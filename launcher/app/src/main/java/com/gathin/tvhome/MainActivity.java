@@ -391,7 +391,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // black under it is a second full-screen fill on every frame for nothing. The starting window still uses
         // the theme's background, so launch looks the same.
         getWindow().setBackgroundDrawable(null);
-        wallpaperPlayer = new WallpaperPlayer(this, root, cfg);
+        wallpaperPlayer = new WallpaperPlayer(this, root, cfg, false);
         sky = findViewById(R.id.sky);
         sky.setIntensity(cfg.skyIntensity);
         glass = findViewById(R.id.glass);
@@ -561,6 +561,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 glassTargetY -= dy;
                 glassScrollShift -= dy;
                 glass.setTranslationY(glass.getTranslationY() - dy);
+            }
+        });
+
+        if (cfg.wallpaperCaptionsAtEnd) grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
+                // A grid that fits on one screen is always at its end.
+                wallpaperPlayer.revealCaption(!rv.canScrollVertically(1));
             }
         });
 

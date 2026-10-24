@@ -202,6 +202,15 @@ final class Config {
     static final String GLOW_RADIAL = "radial", GLOW_HORIZON = "horizon";
     /** Show each rotating wallpaper's name from wallpapers/captions.txt (config.xml / theme wallpaper_captions). */
     final boolean wallpaperCaptions;
+    /**
+     * The rotating collection's folder when the theme sets wallpaper_live: Home looks into it again every minute and
+     * shows a picture that appeared there first, for an app that adds pictures. Null when off or a picture is chosen on the TV.
+     */
+    final File wallpaperLiveDir;
+    /** The clock screensaver shows Home's wallpaper instead of the glow (theme dream_wallpaper). */
+    final boolean dreamWallpaper;
+    /** Wallpaper captions sit bottom right, and on Home only once the grid is scrolled to its end (theme wallpaper_captions_at_end). */
+    final boolean wallpaperCaptionsAtEnd;
     /** Answer VIEW_INPUTS with the Inputs menu (handle_view_inputs); see InputsRequestActivity. */
     final boolean handleViewInputs;
     /** Hold OK on a tile opens a menu (Move, Remove from Home, App info) instead of App info (config.xml / theme tile_menu). */
@@ -220,7 +229,8 @@ final class Config {
                    List<RaceWeekend.Race> raceCalendar, boolean cinematicHome, boolean ambientGlow, boolean appGlow, boolean fadeRows, int homeIdleClockMinutes,
                    boolean keyFilter, boolean dockGlass, String glowStyle, boolean wallpaperCaptions,
                    boolean handleViewInputs, boolean tileMenu, boolean dockEvenPadding, boolean cinematicDots, boolean cinematicWhiteFocus, boolean wifiStatusColor, int cinematicScrim, int cinematicArt,
-                   Map<String, Set<String>> wallpaperMoods, boolean gamepadPassthrough) {
+                   Map<String, Set<String>> wallpaperMoods, boolean gamepadPassthrough, File wallpaperLiveDir, boolean dreamWallpaper,
+                   boolean wallpaperCaptionsAtEnd) {
         this.handleViewInputs = handleViewInputs;
         this.tileMenu = tileMenu;
         this.inputKeycodes = inputKeycodes;
@@ -300,6 +310,9 @@ final class Config {
         this.cinematicScrim = cinematicScrim;
         this.wallpaperMoods = wallpaperMoods;
         this.gamepadPassthrough = gamepadPassthrough;
+        this.wallpaperLiveDir = wallpaperLiveDir;
+        this.dreamWallpaper = dreamWallpaper;
+        this.wallpaperCaptionsAtEnd = wallpaperCaptionsAtEnd;
         this.glowStyle = glowStyle(glowStyle);
         this.wallpaperCaptions = wallpaperCaptions;
     }
@@ -493,8 +506,10 @@ final class Config {
         // An unknown order must not silently change how an existing collection rotates.
         if (!WallpaperRotation.validOrder(wallpaperOrder)) wallpaperOrder = WallpaperRotation.ORDER_SHUFFLE;
         List<File> wallpapers = new ArrayList<>();
+        File liveDir = null;
         if (rotationMinutes > 0 && dir != null && wallpaperEnabled) {
             wallpapers.addAll(WallpaperRotation.images(new File(dir, "wallpapers")));
+            if (bool(json, "wallpaper_live", false)) liveDir = new File(dir, "wallpapers");
         }
         if (wallpapers.isEmpty() && wallpaper != null) wallpapers.add(wallpaper);
         // An on-TV wallpaper pick overrides the theme: a filename from the wallpapers/
@@ -507,6 +522,7 @@ final class Config {
             wallpapers.addAll(chosen);
             wallpaper = chosen.isEmpty() ? null : chosen.get(0);
             wallpaperEnabled = !chosen.isEmpty();
+            liveDir = null;
         }
         // A festive skin comes only from a theme; config.xml has no festival.
         Festival festival = json == null ? Festival.NONE : Festival.parse(string(json, "festival", ""),
@@ -520,7 +536,9 @@ final class Config {
                 Math.max(0, Math.min(100, skyIntensity)), settingsKeycodes, settingsKeyPanel, restoreKeyServices, wallpaperEnabled, wallpaper,
                 wallpapers, rotationMinutes, wallpaperDim, dockOpacity, wallpaperOrder, applied,
                 festival, inputKeycodes, appKeys, stockHomeRedirect, json == null ? Collections.emptyList() : raceCalendar(json), cinematic, ambientGlow, appGlow, fadeRows,
-                Math.max(0, idleClockMinutes), keyFilter, dockGlass, glowStyle, wallpaperCaptions, handleViewInputs, tileMenu, dockEvenPadding, cinematicDots, cinematicWhiteFocus, wifiStatusColor, cinematicScrim, cinematicArt, wallpaperMoods, gamepadPassthrough);
+                Math.max(0, idleClockMinutes), keyFilter, dockGlass, glowStyle, wallpaperCaptions, handleViewInputs, tileMenu, dockEvenPadding, cinematicDots, cinematicWhiteFocus, wifiStatusColor, cinematicScrim, cinematicArt, wallpaperMoods, gamepadPassthrough,
+                liveDir, json != null && bool(json, "dream_wallpaper", false),
+                json != null && bool(json, "wallpaper_captions_at_end", false));
     }
 
     /**

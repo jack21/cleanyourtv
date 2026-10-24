@@ -5,6 +5,9 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.TransitionDrawable;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -22,6 +25,8 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -53,7 +58,21 @@ final class WallpaperPlayer {
     private String displayed = "";
     /** wallpaper_captions: the shown picture's name from wallpapers/captions.txt; null when off or there are none. */
     private final TextView caption;
-    private final Map<String, String> names;
+    private Map<String, String> names;
+    /** wallpaper_live: the folder looked into again every minute, and the captions.txt time last read; null when off. */
+    private final File liveDir;
+    private final boolean captionsOn;
+    private long captionsStamp = -1;
+    /**
+     * Pictures that failed to decode, with their file time: wallpaper_live would otherwise find them again every
+     * minute. A picture written again (a new time) gets another try.
+     */
+    private final Map<String, Long> broken = new HashMap<>();
+    /** The clock screensaver: cross-fade between pictures; Home switches at once as it always has. */
+    private final boolean fade;
+    /** wallpaper_captions_at_end on Home: the caption shows only while the grid is scrolled to its end. */
+    private boolean revealed = true;
+    private static final int FADE_MS = 1500;
     /** wallpaper_moods: the collection's groups by time of day; empty rotates through all of it. */
     private final Map<String, Set<String>> moods;
     /** config.xml latitude and longitude for the sun's times, and today's {sunrise, sunset} once worked out. */
@@ -61,9 +80,11 @@ final class WallpaperPlayer {
     private LocalDate sunDay;
     private int[] sun;
 
-    WallpaperPlayer(Context context, FrameLayout root, Config config) {
+    WallpaperPlayer(Context context, FrameLayout root, Config config, boolean fade) {
         this.root = root;
+        this.fade = fade;
         files = new ArrayList<>(config.wallpapers);
+        liveDir = config.wallpaperLiveDir;
         interval = config.wallpaperRotationMinutes * 60_000L;
         bitmapConfig = config.wallpaperTrueColor ? Bitmap.Config.ARGB_8888 : Bitmap.Config.RGB_565;
         // The dim is painted into the picture (decode), so no full-screen shade layer is drawn on every frame.
@@ -75,7 +96,13 @@ final class WallpaperPlayer {
         longitude = moods.isEmpty() ? "" : context.getString(R.string.longitude);
         // Playback state belongs to one collection. Changing the collection starts from its first
         // picture instead of resuming a filename that belonged to the previous one.
-        String collection = collectionKey(files);
+        // A live collection changes all the time; it keeps its place, and pictures already there count as seen.
+        String collection = liveDir != null ? "live" : collectionKey(files);
+        if (liveDir != null && !preferences.contains("live_known")) {
+            Set<String> known = new HashSet<>();
+            for (File file : files) known.add(file.getName());
+            preferences.edit().putStringSet("live_known", known).apply();
+        }
         if (!collection.equals(preferences.getString("collection", ""))) {
             preferences.edit().putString("collection", collection)
                     .remove("image").remove("changed").apply();
@@ -86,10 +113,13 @@ final class WallpaperPlayer {
         image = new ImageView(context);
         image.setScaleType(ImageView.ScaleType.CENTER_CROP);
         image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
+        captionsOn = config.wallpaperCaptions && config.wallpaperEnabled;
+        names = captionsOn && !files.isEmpty()
                 ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
-        caption = names.isEmpty() ? null : makeCaption(context, root);
-        if (config.wallpaperEnabled && !files.isEmpty()) {
+        caption = names.isEmpty() && (liveDir == null || !captionsOn) ? null
+                : makeCaption(context, root, config.wallpaperCaptionsAtEnd);
+        if (config.wallpaperCaptionsAtEnd && !fade) revealed = false;
+        if (config.wallpaperEnabled && (!files.isEmpty() || liveDir != null)) {
             root.addView(image, 0, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             showFirst();
@@ -114,6 +144,7 @@ final class WallpaperPlayer {
                 root.setBackground(null);
                 displayed = first.getName();
                 showCaption(false);
+                if (liveDir != null) seen(displayed);
                 if (!displayed.equals(previous)) {
                     preferences.edit().putString("image", displayed)
                             .putLong("changed", System.currentTimeMillis()).apply();
@@ -153,13 +184,17 @@ final class WallpaperPlayer {
     }
 
     void update() {
-        if (!active || closed || loading || files.isEmpty()) return;
+        if (!active || closed || loading) return;
+        File fresh = liveDir == null ? null : rescan();
+        if (files.isEmpty()) return;
         String previous = preferences.getString("image", "");
         // A picture outside the time of day's group (the group changed) is replaced at once, not after the interval.
         List<File> playable = playable();
         File selected = WallpaperRotation.find(playable, previous);
         long changed = preferences.getLong("changed", 0);
-        if (selected == null || WallpaperRotation.due(changed, System.currentTimeMillis(), interval)) {
+        if (fresh != null) {
+            selected = fresh;
+        } else if (selected == null || WallpaperRotation.due(changed, System.currentTimeMillis(), interval)) {
             selected = WallpaperRotation.pick(playable, previous, order, random);
         }
         if (selected == null || selected.getName().equals(displayed)) return;
@@ -175,13 +210,16 @@ final class WallpaperPlayer {
                 }
                 if (bitmap == null) {
                     files.remove(next);
+                    broken.put(next.getName(), next.lastModified());
                     Log.w("TvHome.Wallpaper", "Skipping unreadable image: " + next.getName());
                     update();
                     return;
                 }
+                if (current == null) root.setBackground(null);
                 show(bitmap);
                 displayed = next.getName();
                 showCaption(true);
+                if (liveDir != null) seen(displayed);
                 if (!displayed.equals(previous) || changed == 0) {
                     preferences.edit().putString("image", displayed)
                             .putLong("changed", System.currentTimeMillis()).apply();
@@ -191,10 +229,49 @@ final class WallpaperPlayer {
     }
 
     /**
+     * wallpaper_live: reads the folder (and a changed captions.txt) again, and returns the newest picture added since
+     * Home last looked, or null. A picture written in the last few seconds waits for the next minute.
+     */
+    private File rescan() {
+        long settled = System.currentTimeMillis() - 5_000;
+        files.clear();
+        for (File file : WallpaperRotation.images(liveDir)) {
+            // Skip a picture still being written, by any pick, and one that already failed unless written again.
+            if (file.lastModified() > settled
+                    || Long.valueOf(file.lastModified()).equals(broken.get(file.getName()))) continue;
+            files.add(file);
+        }
+        if (captionsOn) {
+            long stamp = new File(liveDir, WallpaperCaptions.FILE_NAME).lastModified();
+            if (stamp != captionsStamp) {
+                captionsStamp = stamp;
+                names = WallpaperCaptions.read(liveDir);
+            }
+        }
+        Set<String> known = new HashSet<>(preferences.getStringSet("live_known", Collections.emptySet()));
+        Set<String> present = new HashSet<>();
+        for (File file : files) present.add(file.getName());
+        // Forget pictures that are gone, so the list stays as small as the folder.
+        boolean changed = known.retainAll(present);
+        // Nothing seen is left (a theme push replaced the collection): what is there now is the collection, not news.
+        if (known.isEmpty() && !present.isEmpty()) {
+            known = present;
+            changed = true;
+        }
+        if (changed) preferences.edit().putStringSet("live_known", known).apply();
+        return WallpaperRotation.fresh(files, known, settled);
+    }
+
+    private void seen(String name) {
+        Set<String> known = new HashSet<>(preferences.getStringSet("live_known", Collections.emptySet()));
+        if (known.add(name)) preferences.edit().putStringSet("live_known", known).apply();
+    }
+
+    /**
      * Small light text under the top-right buttons, above everything else and never focusable. It sits where the
      * top bar ends in every layout, so it does not cover the clock, the stats line or the tiles.
      */
-    private static TextView makeCaption(Context context, FrameLayout root) {
+    private static TextView makeCaption(Context context, FrameLayout root, boolean bottom) {
         float dp = context.getResources().getDisplayMetrics().density;
         TextView text = new TextView(context);
         text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
@@ -211,8 +288,9 @@ final class WallpaperPlayer {
             // the system font is fine
         }
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
-        params.topMargin = Math.round(110 * dp);
+                ViewGroup.LayoutParams.WRAP_CONTENT, (bottom ? Gravity.BOTTOM : Gravity.TOP) | Gravity.END);
+        if (bottom) params.bottomMargin = Math.round(28 * dp);
+        else params.topMargin = Math.round(110 * dp);
         params.setMarginEnd(Math.round(62 * dp));
         root.addView(text, params);
         return text;
@@ -228,6 +306,11 @@ final class WallpaperPlayer {
             return;
         }
         caption.setContentDescription(name);
+        if (!revealed) {
+            caption.setText(name);
+            caption.setAlpha(0f);
+            return;
+        }
         if (!fade || caption.getAlpha() == 0f) {
             caption.setText(name);
             caption.setAlpha(1f);
@@ -237,6 +320,16 @@ final class WallpaperPlayer {
             caption.setText(name);
             caption.animate().alpha(1f).setDuration(350).start();
         }).start();
+    }
+
+    /** wallpaper_captions_at_end: fades the caption in once Home's grid reaches its end, and out as it leaves. */
+    void revealCaption(boolean atEnd) {
+        if (caption == null || revealed == atEnd) return;
+        revealed = atEnd;
+        caption.animate().cancel();   // this drops a pending showCaption end action, so set the name here
+        String name = names.get(displayed);
+        if (name != null) caption.setText(name);
+        caption.animate().alpha(atEnd && name != null ? 1f : 0f).setDuration(300).start();
     }
 
     /** Names plus sizes: enough to notice a different collection without hashing every image. */
@@ -250,8 +343,21 @@ final class WallpaperPlayer {
     private void show(Bitmap bitmap) {
         Bitmap old = current;
         current = bitmap;
-        image.setImageBitmap(bitmap);
-        if (old != null && old != bitmap) image.postDelayed(old::recycle, 500);
+        if (!fade || old == null || old == bitmap) {
+            image.setImageBitmap(bitmap);
+            if (old != null && old != bitmap) image.postDelayed(old::recycle, 500);
+            return;
+        }
+        TransitionDrawable cross = new TransitionDrawable(new Drawable[]{
+                new BitmapDrawable(image.getResources(), old), new BitmapDrawable(image.getResources(), bitmap)});
+        cross.setCrossFadeEnabled(true);
+        image.setImageDrawable(cross);
+        cross.startTransition(FADE_MS);
+        // The finished fade still draws the old picture at alpha 0: hand over to the plain bitmap before recycling it.
+        image.postDelayed(() -> {
+            if (current == bitmap) image.setImageBitmap(bitmap);
+            old.recycle();
+        }, FADE_MS + 100);
     }
 
     private Bitmap decode(File file) {

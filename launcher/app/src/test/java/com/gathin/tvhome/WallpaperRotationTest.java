@@ -12,8 +12,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 
 import org.junit.Test;
 
@@ -128,6 +130,26 @@ public class WallpaperRotationTest {
         assertFalse(WallpaperRotation.due(8 * minute, 10 * minute, 5 * minute));
         assertTrue(WallpaperRotation.due(5 * minute, 10 * minute, 5 * minute));
         assertTrue(WallpaperRotation.due(20 * minute, 10 * minute, 5 * minute));   // clock went back
+    }
+
+    @Test
+    public void freshIsTheNewestPictureHomeHasNotSeenOnceItIsWritten() throws IOException {
+        File dir = Files.createTempDirectory("live").toFile();
+        File old = touch(dir, "a.jpg", 10);
+        File added = touch(dir, "b.jpg", 10);
+        File newest = touch(dir, "c.jpg", 10);
+        old.setLastModified(1_000_000L);
+        added.setLastModified(2_000_000L);
+        newest.setLastModified(3_000_000L);
+        List<File> images = WallpaperRotation.images(dir);
+        Set<String> known = new HashSet<>(Collections.singletonList("a.jpg"));
+        assertEquals("c.jpg", WallpaperRotation.fresh(images, known, 4_000_000L).getName());
+        // Still being written (changed after the cut-off): the one before it shows first.
+        assertEquals("b.jpg", WallpaperRotation.fresh(images, known, 2_500_000L).getName());
+        known.add("b.jpg");
+        known.add("c.jpg");
+        assertNull(WallpaperRotation.fresh(images, known, 4_000_000L));
+        assertNull(WallpaperRotation.fresh(Collections.emptyList(), known, 4_000_000L));
     }
 
     private static List<String> names(List<File> files) {

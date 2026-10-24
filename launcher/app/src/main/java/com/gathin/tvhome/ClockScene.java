@@ -5,12 +5,14 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
+import android.widget.FrameLayout;
 
 import java.util.Random;
 
 /**
  * The clock screensaver's scene (layout dream_clock): the thin clock and date on black over a slow ambient
- * glow. Every minute the clock drifts to a new spot and the glow shifts colour, so nothing burns in.
+ * glow. Every minute the clock drifts to a new spot and the glow shifts colour, so nothing burns in. With the
+ * theme's dream_wallpaper, Home's wallpaper (and its rotation) takes the glow's place, cross-fading as it changes.
  * Shared by ClockDream (the system screensaver) and ClockActivity (Home left idle).
  */
 final class ClockScene {
@@ -26,6 +28,8 @@ final class ClockScene {
     private final Random random = new Random();
     private final View content;
     private final GradientDrawable glow;
+    /** dream_wallpaper: Home's wallpaper under the clock; null shows the glow. */
+    private final WallpaperPlayer wallpaper;
     private int colorIndex;
     private int glowColor;
 
@@ -33,15 +37,20 @@ final class ClockScene {
         @Override
         public void run() {
             moveClock();
-            shiftGlow();
+            if (wallpaper != null) wallpaper.update();
+            else shiftGlow();
             handler.postDelayed(this, MOVE_MS);
         }
     };
 
     /** root is the inflated dream_clock layout. */
-    ClockScene(View root) {
+    ClockScene(View root, Config config) {
         content = root.findViewById(R.id.dreamContent);
         View ambient = root.findViewById(R.id.dreamAmbient);
+        wallpaper = config.dreamWallpaper && config.wallpaperEnabled
+                && (!config.wallpapers.isEmpty() || config.wallpaperLiveDir != null)
+                ? new WallpaperPlayer(root.getContext(), root.findViewById(R.id.dreamRoot), config, true) : null;
+        if (wallpaper != null) ambient.setVisibility(View.GONE);
         glow = new GradientDrawable();
         glow.setGradientType(GradientDrawable.RADIAL_GRADIENT);
         ambient.setBackground(glow);
@@ -59,11 +68,19 @@ final class ClockScene {
         });
         handler.removeCallbacks(tick);
         handler.postDelayed(tick, MOVE_MS);
+        if (wallpaper != null) wallpaper.start();
     }
 
     void stop() {
         handler.removeCallbacksAndMessages(null);   // the tick and any glow steps still queued
         content.animate().cancel();
+        if (wallpaper != null) wallpaper.stop();
+    }
+
+    /** Ends the wallpaper's decoder thread; the scene is not started again. */
+    void close() {
+        stop();
+        if (wallpaper != null) wallpaper.close();
     }
 
     private void moveClock() {
